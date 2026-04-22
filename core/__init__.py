@@ -1,1 +1,2 @@
-"""Core package for IKS-Loom knowledge graph engine."""
+"""Core package for extraction and graph building."""
+

@@ -1,220 +1,311 @@
-"""NLP-based knowledge extraction and Neo4j graph persistence."""
-
 from __future__ import annotations
 
+import json
 import os
-from typing import Any, List
+import re
+from typing import Any, Final, List, Optional
 
-from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from neo4j import GraphDatabase
-from pydantic import BaseModel, Field
+from neo4j.exceptions import Neo4jError
+from pydantic import BaseModel, Field, ValidationError
 
-# --- Pydantic models for structured LLM output ---
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+try:
+    from langchain_core.output_parsers import PydanticOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+except ImportError:  # pragma: no cover
+    from langchain.output_parsers import PydanticOutputParser  # type: ignore[no-redef]
+    from langchain.prompts import ChatPromptTemplate  # type: ignore[no-redef]
+
+
+_SAFE_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_SAFE_RELTYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 class Entity(BaseModel):
-    """A node in the technical / manuscript knowledge graph."""
-
-    id: str = Field(..., description="Stable unique identifier for this entity within the extraction.")
-    label: str = Field(
-        ...,
-        description="High-level category, e.g. Concept, Material, Person, Process, Location, Text.",
-    )
-    name: str = Field(..., description="Human-readable name or short label for the entity.")
+    id: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1, description="e.g., Concept, Material, Person")
+    name: str = Field(..., min_length=1)
 
 
 class Relationship(BaseModel):
-    """A directed edge between two entities by id."""
-
-    source_id: str = Field(..., description="Must match an Entity.id from the same extraction.")
-    target_id: str = Field(..., description="Must match an Entity.id from the same extraction.")
-    type: str = Field(..., description="Short relationship type, e.g. USES, DESCRIBES, PART_OF, REFERENCES.")
+    source_id: str = Field(..., min_length=1)
+    target_id: str = Field(..., min_length=1)
+    type: str = Field(..., min_length=1)
 
 
 class GraphExtraction(BaseModel):
-    """Structured graph payload returned by the LLM."""
-
     entities: List[Entity] = Field(default_factory=list)
     relationships: List[Relationship] = Field(default_factory=list)
 
 
-_EXTRACTION_SYSTEM_PROMPT = """You are an expert in extracting structured technical and historical knowledge \
-from ancient manuscripts, treatises, and technical texts (including mathematics, astronomy, crafts, and materials).
+class KnowledgeExtractionError(RuntimeError):
+    """Raised when knowledge extraction fails or returns invalid output."""
 
-Given passage text, identify salient entities (concepts, materials, people, processes, places, named works) \
-and the relationships between them. Use concise, consistent identifiers for `id` (ASCII, no spaces; use \
-underscores if needed). Every `source_id` and `target_id` in relationships must refer to an `id` you listed \
-in `entities`. Prefer precision over volume: omit trivial or redundant items.
 
-Respond only with data that fits the required JSON schema; do not add commentary."""
+def _get_gemini_api_key() -> Optional[str]:
+    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
 def extract_knowledge(text: str) -> GraphExtraction:
     """
-    Run Gemini over the manuscript text and return a validated `GraphExtraction`.
+    Extract entities and relationships from technical manuscript text via Gemini.
 
-    Uses `GEMINI_API_KEY` from the environment (see `.env`).
+    Returns a validated `GraphExtraction` object.
     """
-    load_dotenv()
-    api_key = os.getenv("GEMINI_API_KEY")
+    if not text or not text.strip():
+        return GraphExtraction()
+
+    api_key = _get_gemini_api_key()
     if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set in the environment.")
+        raise KnowledgeExtractionError(
+            "Missing GEMINI_API_KEY (or GOOGLE_API_KEY) in environment."
+        )
+
+    parser = PydanticOutputParser(pydantic_object=GraphExtraction)
+    format_instructions = parser.get_format_instructions()
+
+    system_prompt = (
+        "You are an expert in extracting technical concepts from ancient manuscripts. "
+        "Extract a knowledge graph from the user-provided text. "
+        "Return ONLY valid JSON that strictly matches the provided schema. "
+        "Do not include markdown, commentary, or additional keys."
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            (
+                "human",
+                "Text to analyze:\n\n{text}\n\n{format_instructions}",
+            ),
+        ]
+    )
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        google_api_key=api_key,
+        model="gemini-1.5-flash",
         temperature=0,
+        google_api_key=api_key,
     )
-    structured = llm.with_structured_output(GraphExtraction)
 
-    messages = [
-        SystemMessage(content=_EXTRACTION_SYSTEM_PROMPT),
-        HumanMessage(
-            content=(
-                "Extract entities and relationships from the following manuscript text.\n\n"
-                f"{text}"
-            )
-        ),
-    ]
+    chain = prompt | llm
+    try:
+        msg = chain.invoke({"text": text, "format_instructions": format_instructions})
+        raw = getattr(msg, "content", msg)
+        if not isinstance(raw, str):
+            raw = str(raw)
+    except Exception as e:  # noqa: BLE001
+        raise KnowledgeExtractionError("LLM invocation failed.") from e
 
-    result = structured.invoke(messages)
-    if not isinstance(result, GraphExtraction):
-        raise RuntimeError("Structured output did not return a GraphExtraction instance.")
-    return result
+    try:
+        return parser.parse(raw)
+    except Exception:
+        try:
+            candidate = raw.strip()
+            if "```" in candidate:
+                candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I | re.S).strip()
+            return GraphExtraction.model_validate(json.loads(candidate))
+        except (json.JSONDecodeError, ValidationError) as e:
+            raise KnowledgeExtractionError(
+                "LLM output could not be parsed/validated against schema."
+            ) from e
+
+
+def _sanitize_label(label: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", (label or "").strip())
+    if not cleaned:
+        return "Entity"
+    if not cleaned[0].isalpha() and cleaned[0] != "_":
+        cleaned = f"_{cleaned}"
+    if _SAFE_LABEL_RE.match(cleaned):
+        return cleaned
+    return "Entity"
+
+
+def _sanitize_rel_type(rel_type: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", (rel_type or "").strip().upper())
+    if not cleaned:
+        return "RELATED_TO"
+    if not cleaned[0].isalpha() and cleaned[0] != "_":
+        cleaned = f"_{cleaned}"
+    if _SAFE_RELTYPE_RE.match(cleaned):
+        return cleaned
+    return "RELATED_TO"
 
 
 class Neo4jManager:
-    """Neo4j access using the official driver with env-based configuration."""
-
     def __init__(self) -> None:
-        load_dotenv()
-        uri = os.getenv("NEO4J_URI")
-        user = os.getenv("NEO4J_USERNAME")
-        password = os.getenv("NEO4J_PASSWORD")
-        if not uri or not user or password is None:
-            raise ValueError("NEO4J_URI, NEO4J_USERNAME, and NEO4J_PASSWORD must be set in the environment.")
-        self._driver = GraphDatabase.driver(uri, auth=(user, password))
+        self.uri = os.getenv("NEO4J_URI")
+        self.username = os.getenv("NEO4J_USERNAME")
+        self.password = os.getenv("NEO4J_PASSWORD")
+
+        missing = [k for k, v in {
+            "NEO4J_URI": self.uri,
+            "NEO4J_USERNAME": self.username,
+            "NEO4J_PASSWORD": self.password,
+        }.items() if not v]
+        if missing:
+            raise ValueError(f"Missing Neo4j env vars: {', '.join(missing)}")
+
+        self._driver = GraphDatabase.driver(self.uri, auth=(self.username, self.password))
 
     def close(self) -> None:
         self._driver.close()
 
     def push_to_graph(self, extraction: GraphExtraction, doc_id: str) -> None:
-        """
-        Persist extracted entities and relationships in a single write transaction.
+        if not doc_id or not doc_id.strip():
+            raise ValueError("doc_id must be a non-empty string.")
 
-        Nodes use label `Entity` with `source_doc` set to `doc_id`. Relationships use `RELATES_TO` with
-        a `type` property holding the LLM relationship type string.
-        """
+        entities = extraction.entities or []
+        relationships = extraction.relationships or []
 
-        def work(tx) -> None:
-            for entity in extraction.entities:
+        def _write(tx) -> None:
+            for ent in entities:
+                node_label = _sanitize_label(ent.label)
+                cypher = (
+                    f"MERGE (n:Entity:{node_label} {{id: $id}}) "
+                    "SET n.name = $name, n.label = $label, n.source_doc = $doc_id"
+                )
                 tx.run(
-                    """
-                    MERGE (e:Entity {id: $id, source_doc: $source_doc})
-                    SET e.name = $name, e.label = $label
-                    """,
-                    id=entity.id,
-                    source_doc=doc_id,
-                    name=entity.name,
-                    label=entity.label,
+                    cypher,
+                    id=ent.id,
+                    name=ent.name,
+                    label=ent.label,
+                    doc_id=doc_id,
                 )
 
-            for rel in extraction.relationships:
+            for rel in relationships:
+                rel_type = _sanitize_rel_type(rel.type)
+                cypher = (
+                    "MATCH (s:Entity {id: $source_id}) "
+                    "MATCH (t:Entity {id: $target_id}) "
+                    f"MERGE (s)-[r:{rel_type}]->(t) "
+                    "SET r.source_doc = $doc_id"
+                )
                 tx.run(
-                    """
-                    MATCH (a:Entity {id: $source_id, source_doc: $source_doc})
-                    MATCH (b:Entity {id: $target_id, source_doc: $source_doc})
-                    MERGE (a)-[r:RELATES_TO {type: $rel_type}]->(b)
-                    """,
+                    cypher,
                     source_id=rel.source_id,
                     target_id=rel.target_id,
-                    source_doc=doc_id,
-                    rel_type=rel.type,
+                    doc_id=doc_id,
                 )
 
-        with self._driver.session() as session:
-            session.execute_write(work)
+        try:
+            with self._driver.session() as session:
+                if hasattr(session, "execute_write"):
+                    session.execute_write(_write)  # neo4j>=5
+                else:  # pragma: no cover
+                    session.write_transaction(_write)  # neo4j<5
+        except Neo4jError as e:
+            raise RuntimeError("Neo4j write failed.") from e
 
-    def search_by_name_substring(self, q: str) -> dict[str, Any]:
+    @staticmethod
+    def _node_to_dict(node: Any) -> dict[str, Any]:
+        props = dict(node) if node is not None else {}
+        labels = list(getattr(node, "labels", []))
+        return {"labels": labels, "properties": props}
+
+    def search(self, q: str, limit: int = 25) -> dict[str, Any]:
         """
-        Find Entity nodes whose `name` contains ``q`` (case-insensitive).
+        Search nodes by case-insensitive substring match on `name`.
 
-        Returns each matching node with its direct outgoing and incoming ``RELATES_TO`` edges,
-        neighbor node properties, and a deduplicated list of ``source_doc`` values seen on the
-        match and its neighbors.
+        Returns:
+            {
+              "results": [ { "node": {...}, "relationships": [...], "neighbors": [...] }, ... ],
+              "source_docs": ["..."]
+            }
+        """
+        if not q or not q.strip():
+            return {"results": [], "source_docs": []}
+
+        q = q.strip()
+        limit = max(1, min(int(limit), 100))
+
+        cypher = """
+        MATCH (n)
+        WHERE n.name IS NOT NULL AND toLower(n.name) CONTAINS toLower($q)
+        OPTIONAL MATCH (n)-[r]-(m)
+        RETURN n,
+               collect(DISTINCT r) AS rels,
+               collect(DISTINCT m) AS neighbors
+        LIMIT $limit
         """
 
-        needle = (q or "").strip()
-        if not needle:
-            return {"matches": [], "source_doc_ids": []}
+        def _read(tx) -> dict[str, Any]:
+            records = tx.run(cypher, q=q, limit=limit)
+            results: list[dict[str, Any]] = []
+            source_docs: set[str] = set()
 
-        def work(tx) -> tuple[list[dict[str, Any]], list[str]]:
-            rows = tx.run(
-                """
-                MATCH (n:Entity)
-                WHERE toLower(n.name) CONTAINS toLower($q)
-                OPTIONAL MATCH (n)-[r_out:RELATES_TO]->(out:Entity)
-                WITH n,
-                  collect(DISTINCT CASE WHEN out IS NOT NULL THEN {rel_type: r_out.type, neighbor: out} END)
-                    AS outgoing
-                OPTIONAL MATCH (inc:Entity)-[r_in:RELATES_TO]->(n)
-                RETURN n,
-                  outgoing,
-                  collect(DISTINCT CASE WHEN inc IS NOT NULL THEN {rel_type: r_in.type, neighbor: inc} END)
-                    AS incoming
-                """,
-                q=needle,
-            )
+            for rec in records:
+                n = rec.get("n")
+                rels = rec.get("rels") or []
+                neighbors = rec.get("neighbors") or []
 
-            matches: list[dict[str, Any]] = []
-            source_ids: set[str] = set()
+                node_dict = self._node_to_dict(n)
+                node_source = node_dict["properties"].get("source_doc")
+                if isinstance(node_source, str) and node_source:
+                    source_docs.add(node_source)
 
-            for record in rows:
-                n = record["n"]
-                node_props = dict(n.items())
-                sd = node_props.get("source_doc")
-                if isinstance(sd, str) and sd:
-                    source_ids.add(sd)
-
-                outgoing: list[dict[str, Any]] = []
-                for item in record["outgoing"]:
-                    if not item:
+                rel_dicts: list[dict[str, Any]] = []
+                for r in rels:
+                    if r is None:
                         continue
-                    nb = item.get("neighbor")
-                    if nb is None:
-                        continue
-                    nb_props = dict(nb.items())
-                    nsd = nb_props.get("source_doc")
-                    if isinstance(nsd, str) and nsd:
-                        source_ids.add(nsd)
-                    outgoing.append({"rel_type": item.get("rel_type"), "neighbor": nb_props})
+                    start_id = None
+                    end_id = None
+                    try:
+                        start_id = r.start_node.get("id")  # type: ignore[attr-defined]
+                        end_id = r.end_node.get("id")  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
 
-                incoming: list[dict[str, Any]] = []
-                for item in record["incoming"]:
-                    if not item:
-                        continue
-                    nb = item.get("neighbor")
-                    if nb is None:
-                        continue
-                    nb_props = dict(nb.items())
-                    nsd = nb_props.get("source_doc")
-                    if isinstance(nsd, str) and nsd:
-                        source_ids.add(nsd)
-                    incoming.append({"rel_type": item.get("rel_type"), "neighbor": nb_props})
+                    rel_props = dict(r)
+                    rel_source = rel_props.get("source_doc")
+                    if isinstance(rel_source, str) and rel_source:
+                        source_docs.add(rel_source)
 
-                matches.append(
+                    rel_dicts.append(
+                        {
+                            "type": getattr(r, "type", None) or getattr(r, "__class__", type("x",(object,),{})).__name__,
+                            "source_id": start_id,
+                            "target_id": end_id,
+                            "properties": rel_props,
+                        }
+                    )
+
+                neighbor_dicts: list[dict[str, Any]] = []
+                for m in neighbors:
+                    if m is None:
+                        continue
+                    md = self._node_to_dict(m)
+                    m_source = md["properties"].get("source_doc")
+                    if isinstance(m_source, str) and m_source:
+                        source_docs.add(m_source)
+                    neighbor_dicts.append(md)
+
+                results.append(
                     {
-                        "node": node_props,
-                        "outgoing": outgoing,
-                        "incoming": incoming,
+                        "node": node_dict,
+                        "relationships": rel_dicts,
+                        "neighbors": neighbor_dicts,
                     }
                 )
 
-            return matches, sorted(source_ids)
+            return {"results": results, "source_docs": sorted(source_docs)}
 
-        with self._driver.session() as session:
-            match_list, doc_ids = session.execute_read(work)
+        try:
+            with self._driver.session() as session:
+                if hasattr(session, "execute_read"):
+                    return session.execute_read(_read)  # neo4j>=5
+                return session.read_transaction(_read)  # pragma: no cover
+        except Neo4jError as e:
+            raise RuntimeError("Neo4j search failed.") from e
 
-        return {"matches": match_list, "source_doc_ids": doc_ids}
+
+def build_graph_from_text(doc_id: str, text: str) -> None:
+    extraction = extract_knowledge(text)
+    manager = Neo4jManager()
+    try:
+        manager.push_to_graph(extraction, doc_id=doc_id)
+    finally:
+        manager.close()
+

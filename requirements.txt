@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pdfplumber
+langchain-google-genai
+neo4j
+supabase
+streamlit
+pydantic
+python-dotenv
+python-multipart
