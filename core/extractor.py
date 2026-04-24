@@ -1,43 +1,45 @@
+import PyPDF2
+import google.generativeai as genai
+import json
 import os
 
+# PUT YOUR REAL API KEY HERE INSIDE THE QUOTES
+API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
+genai.configure(api_key=API_KEY)
+
 def extract_graph_from_pdf(file_path: str):
-    """
-    MOCK EXTRACTOR: Simulates LLM extraction for the TA Demo to avoid API rate limits.
-    Returns a predefined knowledge graph based on the uploaded filename.
-    """
-    filename = os.path.basename(file_path).lower()
+    """Reads a PDF and uses Gemini to extract a JSON knowledge graph."""
+    text = ""
+    try:
+        with open(file_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            # Read first 5 pages to keep API calls fast and cheap
+            for page in reader.pages[:5]: 
+                text += page.extract_text() + "\n"
+    except Exception as e:
+        print(f"PDF Error: {e}")
+        return None
 
-    # --- Scenario 1: Electronics PDF ---
-    if "electronic" in filename:
-        return {
-            "nodes": [
-                {"id": "e1", "label": "Voltage Source", "group": "material"},
-                {"id": "e2", "label": "Resistor", "group": "material"},
-                {"id": "e3", "label": "Ohm's Law", "group": "concept"},
-                {"id": "e4", "label": "Current Flow", "group": "process"},
-                {"id": "e5", "label": "Circuit Diagram", "group": "product"}
-            ],
-            "links": [
-                {"source": "e1", "target": "e4", "relationship": "drives"},
-                {"source": "e2", "target": "e4", "relationship": "limits"},
-                {"source": "e3", "target": "e4", "relationship": "governs"},
-                {"source": "e5", "target": "e1", "relationship": "depicts"}
-            ]
-        }
+    prompt = f"""
+    Analyze the following technical text and extract a knowledge graph.
+    Return ONLY valid JSON with two keys: "nodes" and "links". Do not use markdown blocks.
+    
+    Nodes should have: "id" (string), "label" (string), "group" (string: concept, material, process, discipline, product).
+    Links should have: "source" (node id), "target" (node id), "relationship" (string).
+    Keep it to the most important 5 to 10 entities.
 
-    # --- Scenario 2: Zinc/Rasa Shastra PDF (Default Fallback) ---
-    return {
-        "nodes": [
-            {"id": "z1", "label": "Yashada (Zinc)", "group": "material"},
-            {"id": "z2", "label": "Distillation", "group": "process"},
-            {"id": "z3", "label": "Rasaratna Samuccaya", "group": "concept"},
-            {"id": "z4", "label": "Mushaa (Crucible)", "group": "product"},
-            {"id": "z5", "label": "Purification", "group": "process"}
-        ],
-        "links": [
-            {"source": "z1", "target": "z2", "relationship": "extracted_via"},
-            {"source": "z3", "target": "z1", "relationship": "mentions"},
-            {"source": "z2", "target": "z4", "relationship": "requires"},
-            {"source": "z1", "target": "z5", "relationship": "undergoes"}
-        ]
-    }
+    Text:
+    {text[:8000]}
+    """
+
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        
+        # Clean the response to ensure it's pure JSON
+        result_text = response.text.replace('```json', '').replace('```', '').strip()
+        graph_data = json.loads(result_text)
+        return graph_data
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        return None

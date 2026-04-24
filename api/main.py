@@ -31,10 +31,11 @@ async def upload_document(file: UploadFile = File(...)):
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
+        # Trigger the actual LLM extraction
         extracted_data = extract_graph_from_pdf(file_path)
 
         if extracted_data:
-
+            # Overwrite the global DB with the brand new data
             GLOBAL_GRAPH_DB["nodes"] = extracted_data.get("nodes", [])
             GLOBAL_GRAPH_DB["links"] = extracted_data.get("links", [])
             
@@ -60,13 +61,14 @@ async def search_knowledge_graph(q: str = ""):
 
     query = q.lower().strip()
     
-
+    # If the search bar is empty, show the whole graph
     if not query:
         return {
             "nodes": GLOBAL_GRAPH_DB["nodes"],
             "links": GLOBAL_GRAPH_DB["links"]
         }
 
+    # --- DYNAMIC FILTER LOGIC ---
     matched_node_ids = set()
     for node in GLOBAL_GRAPH_DB["nodes"]:
         if query in str(node.get("label", "")).lower() or query in str(node.get("id", "")).lower():
