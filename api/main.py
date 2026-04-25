@@ -53,16 +53,22 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials.username
 
 def merge_graph(new_data: dict, source_doc: str):
+    print("DEBUG extracted data:", new_data)
     conn = get_db()
+    doc_prefix = source_doc.replace(" ", "_").replace(".", "_")
     for node in new_data.get("nodes", []):
+        unique_id = f"{doc_prefix}__{node.get('id')}"
         conn.execute(
             "INSERT OR IGNORE INTO nodes (id, label, grp, source_doc) VALUES (?, ?, ?, ?)",
-            (node.get("id"), node.get("label"), node.get("group"), source_doc)
+            (unique_id, node.get("label"), node.get("group"), source_doc)
         )
     for link in new_data.get("links", []):
+        doc_prefix_src = source_doc.replace(" ", "_").replace(".", "_")
+        unique_source = f"{doc_prefix_src}__{link.get('source')}"
+        unique_target = f"{doc_prefix_src}__{link.get('target')}"
         conn.execute(
             "INSERT OR IGNORE INTO links (source, target, relationship, source_doc) VALUES (?, ?, ?, ?)",
-            (link.get("source"), link.get("target"), link.get("relationship"), source_doc)
+            (unique_source, unique_target, link.get("relationship"), source_doc)
         )
     conn.commit()
     conn.close()
@@ -98,7 +104,8 @@ async def clear_graph(_=Depends(verify_admin)):
 async def search(q: str = ""):
     conn = get_db()
     if not q.strip():
-        nodes = [dict(r) for r in conn.execute("SELECT id, label, grp as group FROM nodes").fetchall()]
+        rows = conn.execute("SELECT id, label, grp FROM nodes").fetchall()
+        nodes = [{"id": r["id"], "label": r["label"], "group": r["grp"]} for r in rows]
         links = [dict(r) for r in conn.execute("SELECT source, target, relationship FROM links").fetchall()]
         conn.close()
         return {"nodes": nodes, "links": links}
@@ -110,13 +117,15 @@ async def search(q: str = ""):
     ).fetchall()
     matched_ids = {r["id"] for r in matched}
 
+    if not matched_ids:
+        conn.close()
+        return {"nodes": [], "links": []}
+
+    placeholders = ",".join("?" * len(matched_ids))
     connected = conn.execute(
-        "SELECT source, target, relationship FROM links WHERE source IN ({}) OR target IN ({})".format(
-            ",".join("?" * len(matched_ids)),
-            ",".join("?" * len(matched_ids))
-        ),
+        f"SELECT source, target, relationship FROM links WHERE source IN ({placeholders}) OR target IN ({placeholders})",
         list(matched_ids) + list(matched_ids)
-    ).fetchall() if matched_ids else []
+    ).fetchall()
 
     all_ids = set(matched_ids)
     final_links = []
@@ -125,10 +134,9 @@ async def search(q: str = ""):
         all_ids.add(link["target"])
         final_links.append(dict(link))
 
-    final_nodes = [dict(r) for r in conn.execute(
-        "SELECT id, label, grp as \"group\" FROM nodes WHERE id IN ({})".format(",".join("?" * len(all_ids))),
-        list(all_ids)
-    ).fetchall()] if all_ids else []
+    ph2 = ",".join("?" * len(all_ids))
+    rows = conn.execute(f"SELECT id, label, grp FROM nodes WHERE id IN ({ph2})", list(all_ids)).fetchall()
+    final_nodes = [{"id": r["id"], "label": r["label"], "group": r["grp"]} for r in rows]
 
     conn.close()
     return {"nodes": final_nodes, "links": final_links}
