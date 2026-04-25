@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IKS-Loom — Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0a0f; --surface: #111118; --surface2: #1a1a24;
+  --border: #2a2a3a; --gold: #c9a84c; --text: #e8e4d8;
+  --text2: #8a8478; --text3: #5a5650;
+  --green: #7bc47f; --red: #e8627a;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'DM Mono', monospace;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(201,168,76,0.04) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+header {
+  padding: 20px 40px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.logo-mark { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; color: var(--gold); }
+.admin-badge { font-size: 9px; background: rgba(201,168,76,0.1); border: 1px solid rgba(201,168,76,0.2); color: var(--gold); padding: 3px 8px; border-radius: 2px; letter-spacing: 2px; text-transform: uppercase; }
+.back-link { margin-left: auto; font-size: 11px; color: var(--text3); text-decoration: none; letter-spacing: 1px; transition: color 0.2s; }
+.back-link:hover { color: var(--gold); }
+
+.main { flex: 1; padding: 40px; max-width: 860px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 32px; }
+
+.section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 2.5px; color: var(--text3); margin-bottom: 16px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 28px; }
+
+.drop-zone {
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 40px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.drop-zone:hover, .drop-zone.drag-over { border-color: var(--gold); background: rgba(201,168,76,0.03); }
+.drop-icon { font-size: 28px; margin-bottom: 12px; opacity: 0.4; }
+.drop-text { font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+.drop-sub { font-size: 10px; color: var(--text3); letter-spacing: 1px; }
+#fileInput { display: none; }
+
+.queue { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+.queue-item { display: flex; align-items: center; gap: 10px; background: var(--surface2); border-radius: 4px; padding: 9px 12px; font-size: 11px; }
+.queue-item .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text2); }
+.queue-item .fsize { color: var(--text3); flex-shrink: 0; }
+.badge { font-size: 9px; padding: 2px 7px; border-radius: 2px; letter-spacing: 1px; text-transform: uppercase; flex-shrink: 0; }
+.badge-pending { background: rgba(201,168,76,0.1); color: var(--gold); }
+.badge-ok { background: rgba(123,196,127,0.1); color: var(--green); }
+.badge-fail { background: rgba(232,98,122,0.1); color: var(--red); }
+.badge-processing { background: rgba(78,205,196,0.1); color: #4ecdc4; }
+.remove-btn { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; padding: 2px 4px; transition: color 0.15s; flex-shrink: 0; }
+.remove-btn:hover { color: var(--red); }
+
+.actions { display: flex; gap: 10px; margin-top: 20px; }
+.btn { padding: 10px 20px; border-radius: 4px; font-family: 'DM Mono', monospace; font-size: 12px; cursor: pointer; border: none; transition: all 0.2s; letter-spacing: 0.5px; }
+.btn-primary { background: var(--gold); color: #0a0a0f; font-weight: 500; }
+.btn-primary:hover { background: var(--gold2, #e8c97a); }
+.btn-primary:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-ghost { background: none; border: 1px solid var(--border); color: var(--text2); }
+.btn-ghost:hover { border-color: var(--text2); color: var(--text); }
+.btn-danger { background: none; border: 1px solid rgba(232,98,122,0.3); color: var(--red); }
+.btn-danger:hover { background: rgba(232,98,122,0.08); }
+
+.progress-wrap { height: 2px; background: var(--border); border-radius: 1px; margin-top: 16px; overflow: hidden; display: none; }
+.progress-bar { height: 100%; background: var(--gold); width: 0; transition: width 0.4s; }
+
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.stat-card { background: var(--surface2); border-radius: 4px; padding: 20px; text-align: center; }
+.stat-val { font-family: 'Cormorant Garamond', serif; font-size: 36px; color: var(--gold); }
+.stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 2px; color: var(--text3); margin-top: 4px; }
+
+.doc-list { display: flex; flex-direction: column; gap: 6px; }
+.doc-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--surface2); border-radius: 4px; font-size: 11px; }
+.doc-name { flex: 1; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-count { font-size: 10px; color: var(--text3); }
+
+.log { background: var(--surface2); border-radius: 4px; padding: 16px; font-size: 11px; color: var(--text3); max-height: 160px; overflow-y: auto; display: none; }
+.log-line { padding: 2px 0; }
+.log-ok { color: var(--green); }
+.log-err { color: var(--red); }
+.log-info { color: #4ecdc4; }
+
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-thumb { background: var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo-mark">IKS-Loom</span>
+  <span class="admin-badge">Admin</span>
+  <a href="/" class="back-link">← Public View</a>
+</header>
+
+<div class="main">
+
+  <div>
+    <div class="section-title">Database Overview</div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-val" id="stat-nodes">—</div>
+        <div class="stat-label">Total Nodes</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val" id="stat-links">—</div>
+        <div class="stat-label">Total Links</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val" id="stat-docs">—</div>
+        <div class="stat-label">Manuscripts</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Upload Manuscripts</div>
+    <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+      <div class="drop-icon">⊕</div>
+      <div class="drop-text">Drop PDF manuscripts here or click to browse</div>
+      <div class="drop-sub">Multiple files · Max 10 pages extracted per file</div>
+    </div>
+    <input type="file" id="fileInput" multiple accept=".pdf">
+    <div class="queue" id="queue"></div>
+    <div class="progress-wrap" id="progressWrap"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="actions">
+      <button class="btn btn-primary" id="uploadBtn" disabled onclick="uploadFiles()">Process & Ingest</button>
+      <button class="btn btn-ghost" onclick="clearQueue()">Clear Queue</button>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Ingested Manuscripts</div>
+    <div class="doc-list" id="docList"><div style="font-size:11px;color:var(--text3)">Loading…</div></div>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn btn-danger" onclick="clearGraph()">Purge Entire Database</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = '..';
+let pendingFiles = [];
+let adminAuth = '';
+
+function getAuth() {
+  if (!adminAuth) {
+    const pw = prompt('Admin password:') || '';
+    adminAuth = btoa(`admin:${pw}`);
+  }
+  return { 'Authorization': `Basic ${adminAuth}` };
+}
+
+function log(msg, type='info') {
+  const el = document.getElementById('log');
+  el.style.display = 'block';
+  const line = document.createElement('div');
+  line.className = `log-line log-${type}`;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function fmt(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1048576) return `${(bytes/1024).toFixed(0)}KB`;
+  return `${(bytes/1048576).toFixed(1)}MB`;
+}
+
+async function updateStats() {
+  try {
+    const r = await fetch(`${API}/api/stats`, { headers: getAuth() });
+    const d = await r.json();
+    document.getElementById('stat-nodes').textContent = d.nodes.toLocaleString();
+    document.getElementById('stat-links').textContent = d.links.toLocaleString();
+    document.getElementById('stat-docs').textContent = d.documents.toLocaleString();
+  } catch(e) {}
+}
+
+async function loadDocs() {
+  try {
+    const r = await fetch(`${API}/api/documents`, { headers: getAuth() });
+    const d = await r.json();
+    const el = document.getElementById('docList');
+    if (!d.documents.length) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--text3)">No manuscripts ingested yet.</div>';
+      return;
+    }
+    el.innerHTML = d.documents.map(doc => `
+      <div class="doc-item">
+        <span class="doc-name" title="${doc.source_doc}">${doc.source_doc}</span>
+        <span class="doc-count">${doc.node_count} nodes</span>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); addFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => addFiles(fileInput.files));
+
+function addFiles(files) {
+  for (const f of files) if (f.type === 'application/pdf') pendingFiles.push(f);
+  renderQueue();
+  document.getElementById('uploadBtn').disabled = pendingFiles.length === 0;
+}
+
+function renderQueue() {
+  document.getElementById('queue').innerHTML = pendingFiles.map((f, i) => `
+    <div class="queue-item" id="qi-${i}">
+      <span class="fname">${f.name}</span>
+      <span class="fsize">${fmt(f.size)}</span>
+      <span class="badge badge-pending">pending</span>
+      <button class="remove-btn" onclick="removeFile(${i})">×</button>
+    </div>`).join('');
+}
+
+function removeFile(i) {
+  pendingFiles.splice(i, 1);
+  renderQueue();
+  document.getElementById('uploadBtn').disabled = pendingFiles.length === 0;
+}
+
+function clearQueue() {
+  pendingFiles = [];
+  renderQueue();
+  document.getElementById('uploadBtn').disabled = true;
+}
+
+async function uploadFiles() {
+  if (!pendingFiles.length) return;
+  const btn = document.getElementById('uploadBtn');
+  btn.disabled = true;
+  btn.textContent = 'Processing…';
+  document.getElementById('progressWrap').style.display = 'block';
+  const bar = document.getElementById('progressBar');
+
+  const fd = new FormData();
+  pendingFiles.forEach(f => fd.append('files', f));
+  log(`Starting ingestion of ${pendingFiles.length} file(s)…`, 'info');
+
+  bar.style.width = '20%';
+  try {
+    const r = await fetch(`${API}/api/upload`, {
+      method: 'POST',
+      headers: getAuth(),
+      body: fd
+    });
+    bar.style.width = '90%';
+    if (r.status === 401) { adminAuth = ''; throw new Error('Wrong password'); }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    bar.style.width = '100%';
+
+    data.results.forEach(res => {
+      const ok = res.status === 'ok';
+      log(`${res.filename} — ${ok ? 'ingested successfully' : 'extraction failed'}`, ok ? 'ok' : 'err');
+    });
+    log(`Database now has ${data.total_nodes} nodes.`, 'info');
+
+    pendingFiles = [];
+    renderQueue();
+    document.getElementById('uploadBtn').disabled = true;
+    fileInput.value = '';
+    await updateStats();
+    await loadDocs();
+  } catch(e) {
+    log(`Error: ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Process & Ingest';
+    setTimeout(() => {
+      document.getElementById('progressWrap').style.display = 'none';
+      bar.style.width = '0';
+    }, 1500);
+  }
+}
+
+async function clearGraph() {
+  if (!confirm('This will delete ALL nodes and links. Are you sure?')) return;
+  try {
+    const r = await fetch(`${API}/api/graph`, { method: 'DELETE', headers: getAuth() });
+    if (r.ok) { log('Database purged.', 'err'); await updateStats(); await loadDocs(); }
+  } catch(e) { log('Purge failed: ' + e.message, 'err'); }
+}
+
+getAuth();
+updateStats();
+loadDocs();
+</script>
+</body>
+</html>
