@@ -112,8 +112,8 @@ async def search(q: str = ""):
 
     query = f"%{q.lower().strip()}%"
     matched = conn.execute(
-        "SELECT id FROM nodes WHERE LOWER(label) LIKE ? OR LOWER(id) LIKE ?",
-        (query, query)
+        "SELECT id FROM nodes WHERE LOWER(label) LIKE ?",
+        (query,)
     ).fetchall()
     matched_ids = {r["id"] for r in matched}
 
